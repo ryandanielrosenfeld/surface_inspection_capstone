@@ -23,21 +23,17 @@ camera_pub = rospy.Publisher('crop_image',Image,queue_size=10)
 
 # DBSCAN vars
 eps = .15 # distance from center to create cluster
-#min_samples = 15 # number of samples needed to create new cluster
-min_samples = 10
+min_samples = 10 # number of samples needed to create new cluster
 
-# Scaling parameters
+# Scaling parameters for normalization
 max_int = 950
 min_int = 500
 max_rng = .03
 min_rng = 0
-max_z_accel = 1.48
-min_z_accel = .0069
-max_z_angular = .65
-min_z_angular = -1.2
 max_pixel = 100
 min_pixel = 0
 
+# Normalization function, makes values between 0 and 1
 def normalize(value, maximum, minimum):
 	res = (value - minimum) / (maximum - minimum)
 	if res < 0:
@@ -46,9 +42,8 @@ def normalize(value, maximum, minimum):
 		res = 1
 	return res
 
+# Class to store information on callbacks
 class SurfaceMonitor:
-	curr_acc = []
-	curr_z_ang = []
 	curr_lidar_int = []
 	curr_lidar_range = []
 	curr_x_vel = []
@@ -67,17 +62,6 @@ class SurfaceMonitor:
 	test_count_limit = 5 # Limit of test runs before checking to throw out overall_vector
 	perc_neg_one = .75 # Percent limit of negative ones in recent readings to continue using test vector
 	test_count = 0 # Keeps track of number of runs through state 2
-
-	def imu_callback(self, data):
-		# z accel
-		self.curr_acc.append(data.linear_acceleration.z)
-
-		# z angular
-		self.curr_z_ang.append(data.angular_velocity.z)
-
-		if len(self.curr_acc) >= step_size:
-			self.check_surface()
-			self.reset_curr_arrs()
 
 	def camera_callback(self, data):
 		bridge = CvBridge()
@@ -104,20 +88,19 @@ class SurfaceMonitor:
 		for i in range(358):
 			z_displacements.append(math.sin(0.6108652)*math.cos(-0.781035+ .004363*i)*data.ranges[i])
 		self.curr_lidar_range.append(np.std(z_displacements))
-
-		#if len(self.curr_lidar_range) >= step_size:
-		#	self.check_surface()
-		#	self.reset_curr_arrs()
-
-
+		
+		# Trigger DBSCAN calculation
+		if len(self.curr_lidar_range) >= step_size:
+			self.check_surface()
+			self.reset_curr_arrs()
+	
+	# Creates the vector to send to perform_dbscan
 	def check_surface(self):
 		if len(self.curr_lidar_int) == 0:
 			print("Lidar not working")
 			return
 
 		# Modify measurement arrays so they're all a single value
-		accel = np.std(self.curr_acc)
-		angular = sum(self.curr_z_ang)/float(len(self.curr_z_ang))
 		intensity = sum(self.curr_lidar_int)/float(len(self.curr_lidar_int))
 		rng = sum(self.curr_lidar_range)/float(len(self.curr_lidar_range))
 		vel = 0
@@ -125,23 +108,15 @@ class SurfaceMonitor:
 			vel = sum(self.curr_x_vel)/len(self.curr_x_vel)
 		edge = np.mean(self.curr_edges)
 
-		#print(rng)
-
 		# Publish range data
 		bumpiness_pub.publish(rng)
 
 		# Perform normalization
-		accel = normalize(accel, max_z_accel, min_z_accel)
-		angular = normalize(angular, max_z_angular, min_z_angular)
 		intensity = normalize(intensity, max_int, min_int)
 		rng = normalize(rng, max_rng, min_rng)
 		edge = normalize(edge, max_pixel,min_pixel)
-		#print(rng)
-		#print("----------------------")
 
-
-		# Create vector for past step
-		print(str(intensity) + "," + str(rng) + "," + str(edge))
+		# Create vector for this step
 		self.recent_vector = [[intensity, rng, edge]]
 
 		# If state 0, append to overall vector normally and perform DBSCAN after 30 measurements
@@ -157,23 +132,17 @@ class SurfaceMonitor:
 		elif self.state == 2:
 			# Update test vector to overall vector if behind it
 			if len(self.test_vector) < len(self.overall_vector):
-				self.test_vector = list(self.overall_vector)
+				self.test_vector = list(self.overall_vector) # Set test vector to a copy of the overall vector
 			self.test_vector += self.recent_vector # add most recent reading
 			self.perform_dbscan(self.test_vector) # perform DBSCAN
-
+	
+	# Performs DBSCAN and updates the state machine
 	def perform_dbscan(self, vector):
 		db = DBSCAN(eps=eps, min_samples=min_samples).fit(vector) # Create DBSCAN model and fit it to the vector
+		labels = db.labels_
 		self.count += 1
 
-		# Status printing
-		#print("Run: " + str(self.count))
-		#print("Current state: " + str(self.state))
-		#print(db.labels_)
-		#print(str(self.count) + "," + str(db.labels_[-1])) # print out the classified labels for the vector
-		#print("-----------------------------------------------------------")
-		labels = db.labels_
-
-		# Publish surface identification
+		# Publish surface identification for past step
 		pub.publish(labels[-1])
 
 		# HANDLE STATE MACHINE
@@ -185,10 +154,13 @@ class SurfaceMonitor:
 
 		# If state 1, move to state 2 if reads -1 neg_one_thresh # of times in a row
 		elif self.state == 1:
+			# Increment or reset neg_one_count
 			if labels[-1] == -1:
 				self.neg_one_count += 1
 			else:
 				self.neg_one_count = 0
+			
+			# Check neg_one_count
 			if self.neg_one_count >= self.neg_one_thresh:
 				self.state = 2
 				self.test_count = 0
@@ -199,9 +171,13 @@ class SurfaceMonitor:
 		# this happens, dump test_vector and return to state 1 if not too many neg ones recently
 		elif self.state == 2:
 			self.test_count += 1
+			
+			# Get labels with overall vector to compare to test vector
 			prev = DBSCAN(eps=eps, min_samples=min_samples).fit(self.overall_vector).labels_
 			prev_clusters = len(set([x for x in prev if x != -1]))
 			test_clusters = len(set([x for x in labels if x != -1]))
+			
+			# If a new cluster found && that new cluster is found >= 80% of the time in the last 15 samples
 			if test_clusters > prev_clusters and list(labels[-15:]).count(test_clusters-1) / 15.0 >= .8:
 				self.overall_vector = [self.test_vector[i] for i,x in enumerate(labels) if x != -1]
 				self.test_vector = []
@@ -218,10 +194,6 @@ class SurfaceMonitor:
 					perc_neg_one = list(labels[-self.test_count_limit:]).count(-1) / self.test_count_limit
 					if perc_neg_one > self.perc_neg_one:
 						self.test_count = 0
-					#elif perc_neg_one == 0: # Controlled expansion of previous clusters
-					#	self.overall_vector = [self.test_vector[i] for i,x in enumerate(labels) if x != -1]
-					#	self.test_vector = []
-					#	self.state = 1
 					else:
 						self.test_vector = []
 						self.state = 1
