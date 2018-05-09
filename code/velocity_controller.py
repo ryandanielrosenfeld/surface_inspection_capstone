@@ -18,9 +18,9 @@ import numpy as np
 
 '''
 A listener that subscribes to the node publishing the current surface.  When the surface changes, check to see if the
-new one is already known.  If so, update the command parameter tuple (speed_coefficient, turn_radius_coefficient) to
-the previously discovered values for this surface.  If the surface is unknown, gradually increase the speed of the robot
-until the vibration threshold is reached.
+new one is already known.  If so, update the command parameter for max speed to the previously discovered value for 
+this surface.  If the surface is unknown, create a temporary entry with the default value. If the vibrations exceed the specified 
+threshold, reduce the max speed parameter for the current surface.
 '''
 
 default_dict = {"max_x_vel" : 2.0, "max_accel" : 0.25}
@@ -34,10 +34,9 @@ previous_surface = -1
 # bumpiness tracking
 previous_bumpiness = 0
 current_bumpiness = 0
-upcoming_bumpiness = False
-surface_transition = False
-
-start_position = 0
+upcoming_bumpiness = False # if this is true the upcoming surface is considerably bumpier than the current one
+surface_transition = False # if this is true the upcoming surface is considerably less bumpy than the current one
+start_position = 0 # we will measure the distance from this point to determine when we have reached the upcoming bumpy or smooth surface
 
 accels = []
 
@@ -85,16 +84,25 @@ def surface_callback(data):
     previous_surface = current_surface
     current_surface = data.data
 
-    # if we have been on this surface before, we can update the tuple directly
+    # check to make sure the current surface isn't already known
     if current_surface not in surface_data:
+	# if the previous surface was unclassified (-1), the parameters for the -1 entry have been updating
+	# and need to be stored in the dictionary
+	# otherwise set the new entry to the default values
         if previous_surface == -1:
+	    # set the values for the new entry to the current values for -1
             surface_data[current_surface] = surface_data[-1].copy()
+	    # and then reset the values for -1 back to the defaults
             surface_data[-1] = default_dict.copy()
         else:
-	       surface_data[current_surface] = default_dict.copy()
+	    surface_data[current_surface] = default_dict.copy()
     else:
 	   surface_data[-1] = default_dict.copy()
 
+'''
+Callback to run every time a new standard deviation of a set of z acceleration measurements
+is published to the surface_bumpiness topic
+'''
 def bumpiness_callback(data):
     global previous_bumpiness
     global current_bumpiness
@@ -104,17 +112,17 @@ def bumpiness_callback(data):
     previous_bumpiness = current_bumpiness
     current_bumpiness = data.data
 
-    #print(current_bumpiness, previous_bumpiness)
-    #print("---------------------")
-
-    # Upcoming bumpier surface
+    # Check to see if the upcoming surface is substantially bumpier than the current one
     if current_bumpiness > previous_bumpiness * 1.75 and previous_bumpiness != 0:
         upcoming_bumpiness = True
 
-    # Upcoming less bumpy surface
+    # Check to see if the upcoming surface is substantially less bumpy than the current one
     if current_bumpiness < previous_bumpiness / 1.75 and previous_bumpiness != 0:
         surface_transition = True
 
+'''
+Callback to run every time a new message is published to the /odometry/filtered topic
+'''
 def odometry_callback(data):
     global current_x_vel
     global delta_t
@@ -127,26 +135,35 @@ def odometry_callback(data):
     velocity_msg = data.twist.twist
     # get the x velocity
     current_x_vel = velocity_msg.linear.x
-    # calculate the time difference between the previous velocity reading and this one
+    # calculate the time difference between the previous velocity reading and this current one
     current_seconds = data.header.stamp.secs
     current_nanoseconds = data.header.stamp.nsecs
     current_stamp = (10**-9) * current_nanoseconds + current_seconds
     delta_t = current_stamp - previous_odometry_reading_time
+    # and update the global previous time to be used on the next iteration
     previous_odometry_reading_time = current_stamp
 
     # distance tracking for upcoming surface
     lidar_look_ahead_distance_m = .45
     current_position = data.pose.pose.position.x
 
+    # if either upcoming_bumpiness or surface_transition are true it is likely we are about to change surfaces
+    # make sure start_position is zero to ensure we aren't already preparing for this transition
+    # if not update the start position to the current position of the robot so we can start keeping track of the distance travelled
     if (upcoming_bumpiness or surface_transition) and start_position == 0:
         start_position = current_position
-        #print("TRANSITION DETECTED")
 
+    # measure the distance travelled since the start position
+    # if it is greater than the lidar look ahead distance value, we have made it to the next surface, so reset the 
+    # upcoming_bumpiness and surface_transition parameters and reset the start position back to zero
     if start_position != 0 and abs(current_position - start_position) >= lidar_look_ahead_distance_m:
         upcoming_bumpiness = False
         surface_transition = False
         start_position = 0
 
+'''
+Callback to run every time a new message is published to the joystick topic
+'''
 def joystick_callback(data):
     global previous_stamp
     global previous_x_velocity
@@ -157,21 +174,28 @@ def joystick_callback(data):
     global default_dict
     global upcoming_bumpiness
 
+    # the twist message that will be sent to the robot
+    # this will be the joystick command after being modified by the control adaptation algorithm
     output_velocity = Twist()
 
     # If R2 is not pressed down, don't move robot
     if data.buttons[9] == 0:
         return
-
+    # read the command from the joystick
     input_x_velocity = data.axes[1] * -2
     input_x_direction = 1
+    # set the reverse flag if the velocity is negative
     if input_x_velocity < 0:
         input_x_direction = -1
+    # get the magnitude of the velocity
     input_x_velocity = abs(input_x_velocity)
 
+    # if the upcoming_bumpiness flag is true, meaning the upcoming surface is considerably bumpier than the current one
+    # start slowing down by setting the input velocity really low
     if upcoming_bumpiness and input_x_velocity > 0.2:
         input_x_velocity = 0.2
 
+    # get the maximum speed parameter for the current surface from the dictionary
     surface_dictionary = surface_data[current_surface]
     output_x_velocity = min(surface_dictionary["max_x_vel"], input_x_velocity) * input_x_direction
 
