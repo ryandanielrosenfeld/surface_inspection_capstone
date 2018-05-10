@@ -289,7 +289,6 @@ def listener():
     # anonymous=True flag means that rospy will choose a unique
     # name for our 'listener' node so that multiple listeners can
     # run simultaneously.
-    #print("in listener")
     rospy.init_node('surface_listener', anonymous=True)
 
     rospy.Subscriber('surface_detection', Int16, surface_callback)
@@ -302,23 +301,9 @@ def listener():
     rospy.Subscriber("/bluetooth_teleop/joy", Joy, joystick_callback)
 
     rospy.Subscriber("/odometry/filtered", Odometry, odometry_callback)
-
-    # Set up bag recording
-    command = "rosbag record /imu/data /odometry/filtered /bluetooth_teleop/joy /feedback /cmd_vel /surface_detection -o final_demo_" + sys.argv[1] +  ".bag"
-    p = subprocess.Popen(command, stdin=subprocess.PIPE, shell=True, cwd="./", executable='/bin/bash')
-
-    rospy.sleep(2)
-
+	
     while not rospy.is_shutdown():
-        if (raw_input("Exit? (y/n): ") == 'y'):
-            list_cmd = subprocess.Popen("rosnode list", shell=True, stdout=subprocess.PIPE)
-            list_output = list_cmd.stdout.read()
-            retcode = list_cmd.wait()
-            assert retcode == 0, "List command returned %d" % retcode
-            for str in list_output.split("\n"):
-                if (str.startswith("/record")):
-                    os.system("rosnode kill " + str)
-            break
+        pass
 
 
 if __name__ == '__main__':
